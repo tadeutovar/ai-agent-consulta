@@ -153,29 +153,107 @@ def agendar_consulta_retorno(cpf: str, data_consulta: str, horario_consulta: str
     except Exception as e:
         print(f"ERRO CRÍTICO em agendar_consulta_retorno: {e}")
         return json.dumps({"status": "erro"})
+    
+def listar_consultas_agendadas(cpf: str):
+    """Lista todas as consultas futuras e agendadas para um paciente específico."""
+    cpf_limpo = _limpar_cpf(cpf)
+    print(f"--- Ferramenta 'listar_consultas_agendadas' chamada para CPF: {cpf_limpo} ---")
+    if not os.path.exists(DB_CONSULTAS):
+        return json.dumps({"info": "Nenhuma consulta encontrada no sistema."})
+
+    consultas_df = pd.read_csv(DB_CONSULTAS, dtype={'cpf_paciente': str, 'id_consulta': str})
+    consultas_df['cpf_paciente'] = consultas_df['cpf_paciente'].apply(_limpar_cpf)
+    
+    consultas_paciente = consultas_df[
+        (consultas_df['cpf_paciente'] == cpf_limpo) &
+        (consultas_df['status'] == 'agendado') &
+        (consultas_df['data_consulta'] >= hoje)
+    ]
+    
+    if consultas_paciente.empty:
+        return json.dumps({"info": "Nenhuma consulta futura agendada foi encontrada para este CPF."})
+    
+    lista_para_ia = consultas_paciente[['id_consulta', 'data_consulta', 'horario_consulta']].to_dict('records')
+    return json.dumps({"consultas": lista_para_ia})
+
+def cancelar_consulta(id_consulta: str):
+    """Cancela uma consulta específica pelo seu ID único e atualiza o status."""
+    print(f"--- Ferramenta 'cancelar_consulta' chamada para ID: {id_consulta} ---")
+    try:
+        if not os.path.exists(DB_CONSULTAS):
+            return json.dumps({"status": "erro", "mensagem": "Arquivo de consultas não encontrado."})
+
+        consultas_df = pd.read_csv(DB_CONSULTAS, dtype={'id_consulta': str})
+        consulta_idx_list = consultas_df.index[consultas_df['id_consulta'] == id_consulta].tolist()
+        
+        if not consulta_idx_list:
+            return json.dumps({"status": "erro", "mensagem": "ID da consulta não encontrado."})
+        
+        consulta_idx = consulta_idx_list[0]
+        id_evento_google = consultas_df.loc[consulta_idx, 'id_evento_google']
+        
+        service = autenticar_google_calendar()
+        try:
+            service.events().delete(calendarId='primary', eventId=id_evento_google, sendUpdates='all').execute()
+            print(f"--- Evento {id_evento_google} deletado do Google Calendar. ---")
+        except HttpError as e:
+            if e.resp.status != 410: # 410 significa "Gone", o evento já não existe, o que está ok.
+                raise e
+            print(f"--- Evento {id_evento_google} já não existia. Prosseguindo. ---")
+
+        consultas_df.loc[consulta_idx, 'status'] = 'cancelado'
+        consultas_df.to_csv(DB_CONSULTAS, index=False)
+        print(f"--- Status da consulta {id_consulta} atualizado para 'cancelado'. ---")
+        
+        return json.dumps({"status": "sucesso", "mensagem": "A consulta foi cancelada com sucesso."})
+
+    except Exception as e:
+        print(f"ERRO CRÍTICO em cancelar_consulta: {e}")
+        return json.dumps({"status": "erro", "mensagem": "Ocorreu um erro grave ao tentar cancelar a consulta."})
 
 def main():
     tools = [
+        # Ferramentas existentes
         {"type": "function", "function": {"name": "verificar_paciente_existente", "description": "Verifica um paciente pelo CPF.", "parameters": {"type": "object", "properties": {"cpf": {"type": "string"}}, "required": ["cpf"]}}},
         {"type": "function", "function": {"name": "buscar_horarios_disponiveis", "description": "Busca horários livres em uma data.", "parameters": {"type": "object", "properties": {"data": {"type": "string"}}, "required": ["data"]}}},
-        {"type": "function", "function": {"name": "cadastrar_paciente_e_agendar", "description": "Cadastra um NOVO paciente e agenda sua primeira consulta.", "parameters": {"type": "object", "properties": {"cpf": {"type": "string"}, "nome": {"type": "string"}, "email": {"type": "string"}, "telefone": {"type": "string"}, "data_nascimento": {"type": "string", "description": "Formato AAAA-MM-DD"}, "data_consulta": {"type": "string"}, "horario_consulta": {"type": "string"}}, "required": ["cpf", "nome", "email", "telefone", "data_nascimento", "data_consulta", "horario_consulta"]}}},
-        {"type": "function", "function": {"name": "agendar_consulta_retorno", "description": "Agenda uma consulta para um paciente EXISTENTE.", "parameters": {"type": "object", "properties": {"cpf": {"type": "string"}, "data_consulta": {"type": "string"}, "horario_consulta": {"type": "string"}}, "required": ["cpf", "data_consulta", "horario_consulta"]}}}
+        {"type": "function", "function": {"name": "cadastrar_paciente_e_agendar", "description": "Cadastra um NOVO paciente e agenda a primeira consulta.", "parameters": {"type": "object", "properties": {"cpf": {"type": "string"}, "nome": {"type": "string"}, "email": {"type": "string"}, "telefone": {"type": "string"}, "data_nascimento": {"type": "string"}, "data_consulta": {"type": "string"}, "horario_consulta": {"type": "string"}}, "required": ["cpf", "nome", "email", "telefone", "data_nascimento", "data_consulta", "horario_consulta"]}}},
+        {"type": "function", "function": {"name": "agendar_consulta_retorno", "description": "Agenda uma consulta para um paciente EXISTENTE.", "parameters": {"type": "object", "properties": {"cpf": {"type": "string"}, "data_consulta": {"type": "string"}, "horario_consulta": {"type": "string"}}, "required": ["cpf", "data_consulta", "horario_consulta"]}}},
+        
+        # Novas ferramentas
+        {"type": "function", "function": {"name": "listar_consultas_agendadas", "description": "Lista todas as consultas futuras de um paciente pelo CPF.", "parameters": {"type": "object", "properties": {"cpf": {"type": "string"}}, "required": ["cpf"]}}},
+        {"type": "function", "function": {"name": "cancelar_consulta", "description": "Cancela uma consulta específica usando o seu ID único.", "parameters": {"type": "object", "properties": {"id_consulta": {"type": "string"}}, "required": ["id_consulta"]}}}
     ]
-    available_tools = {"verificar_paciente_existente": verificar_paciente_existente, "buscar_horarios_disponiveis": buscar_horarios_disponiveis, "cadastrar_paciente_e_agendar": cadastrar_paciente_e_agendar, "agendar_consulta_retorno": agendar_consulta_retorno}
+    
+    available_tools = {
+        # Ferramentas existentes
+        "verificar_paciente_existente": verificar_paciente_existente,
+        "buscar_horarios_disponiveis": buscar_horarios_disponiveis,
+        "cadastrar_paciente_e_agendar": cadastrar_paciente_e_agendar,
+        "agendar_consulta_retorno": agendar_consulta_retorno,
+        # Novas ferramentas
+        "listar_consultas_agendadas": listar_consultas_agendadas,
+        "cancelar_consulta": cancelar_consulta
+    }
 
     messages = [{"role": "system", "content": f"""
-        Você é um assistente virtual do consultório do Dr. João Silva. Sua personalidade é prestativa, educada e humana. Hoje é {hoje}.
+        Você é o assistente virtual do Dr. João Silva. Sua personalidade é educada, prestativa e humana. Hoje é {hoje}.
 
-        **FLUXO DE CONVERSA PRINCIPAL (Modelo Reativo e Preciso):**
-        1.  **SAUDAÇÃO INICIAL:** Comece de forma calorosa e aberta. Nunca peça o CPF de imediato.
-        2.  **AGUARDE A INTENÇÃO:** Espere o usuário dizer o que deseja (marcar, cancelar, etc.).
-        3.  **PEÇA O CPF (QUANDO NECESSÁRIO):** Se a ação exigir dados pessoais, peça o CPF educadamente.
-        4.  **VERIFIQUE O PACIENTE:** Use a ferramenta `verificar_paciente_existente`.
-        5.  **CAMINHO - PACIENTE RECORRENTE:** Se encontrado, saúde-o pelo nome e pergunte para qual dia ele deseja a consulta.
-        6.  **CAMINHO - NOVO PACIENTE:** Se não encontrado, informe-o e peça os dados de cadastro (Nome, E-mail, Telefone, Data de Nascimento). Após coletar, peça consentimento (LGPD). Após o consentimento, pergunte: "Perfeito, cadastro realizado! Para qual data você gostaria de agendar sua primeira consulta?". NUNCA busque horários sem o usuário informar a data.
-        7.  **BUSCANDO HORÁRIOS:** Ao receber a data do usuário, use `buscar_horarios_disponiveis`. Se retornar horários, sua única tarefa é apresentar a lista e perguntar qual o usuário prefere. Se retornar erro ou info, apenas repasse a mensagem.
-        8.  **AGENDAMENTO FINAL:** Após o usuário escolher um horário válido, use a ferramenta apropriada (`cadastrar_paciente_e_agendar` para novos, `agendar_consulta_retorno` para existentes).
-        Siga estas instruções rigorosamente.
+        **Fluxo de Gerenciamento de Consultas:**
+        1.  **INTENÇÃO DE CANCELAR:**
+            a. Peça o CPF. Use `listar_consultas_agendadas`.
+            b. Se houver consultas, pergunte qual cancelar.
+            c. Após a escolha, pergunte: "Entendido. Você prefere apenas cancelar ou gostaria de remarcar para uma nova data?".
+            d. Se "cancelar", use `cancelar_consulta` e confirme.
+            e. Se "remarcar", inicie o Fluxo de Remarcação.
+
+        2.  **INTENÇÃO DE REMARCAR:**
+            a. Peça o CPF. Use `listar_consultas_agendadas`.
+            b. Após ele escolher qual remarcar, use `cancelar_consulta` nela.
+            c. Confirme o cancelamento e diga: "Agora, para qual nova data podemos agendar?".
+            d. Siga o fluxo normal de agendamento (`buscar_horarios_disponiveis` e `agendar_consulta_retorno`).
+
+        **Outros Fluxos:**
+        - Siga os fluxos de agendamento para pacientes novos/recorrentes como treinado.
         """}]
     
     print("Assistente: Olá! Sou o assistente virtual do Dr. João Silva. Como posso ajudar você hoje?")
@@ -200,10 +278,8 @@ def main():
                     function_args = json.loads(tool_call.function.arguments)
                     function_response = function_to_call(**function_args)
                     messages.append({"tool_call_id": tool_call.id, "role": "tool", "name": function_name, "content": function_response})
-                except json.JSONDecodeError:
-                    print(f"Erro: Argumentos inválidos da IA para a ferramenta {function_name}.")
-                except TypeError as e:
-                    print(f"Erro de argumento na chamada da ferramenta {function_name}: {e}")
+                except Exception as e:
+                    print(f"Erro na chamada da ferramenta {function_name}: {e}")
 
             final_response = client.chat.completions.create(model="gpt-4o", messages=messages)
             print("Assistente:", final_response.choices[0].message.content)
